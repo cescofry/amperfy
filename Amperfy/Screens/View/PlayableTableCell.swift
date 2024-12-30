@@ -49,6 +49,8 @@ class PlayableTableCell: BasicTableCell {
     @IBOutlet weak var durationTrailingCellConstraint: NSLayoutConstraint!
     @IBOutlet weak var optionsButton: UIButton!
     @IBOutlet weak var deleteButton: UIButton!
+    @IBOutlet weak var playOverArtworkButton: UIButton!
+    @IBOutlet weak var playOverNumberButton: UIButton!
     
     static let rowHeight: CGFloat = 48 + margin.bottom + margin.top
     private static let touchAnimation = 0.4
@@ -61,8 +63,15 @@ class PlayableTableCell: BasicTableCell {
     private var playIndicator: PlayIndicator?
     private var isDislayAlbumTrackNumberStyle: Bool = false
     private var displayMode: DisplayMode = .normal
+#if targetEnvironment(macCatalyst)
     private var hoverGestureRecognizer: UIHoverGestureRecognizer!
-    
+    private var doubleTapGestureRecognizer: UITapGestureRecognizer!
+    private var isHovered = false
+    private var isNotificationRegistered = false
+#else
+    private var singleTapGestureRecognizer: UITapGestureRecognizer!
+#endif
+
     public var isMarked = false
     private var isDeleteButtonAllowedToBeVisible: Bool {
         return (traitCollection.userInterfaceIdiom == .mac) && (playerIndexCb != nil)
@@ -74,8 +83,40 @@ class PlayableTableCell: BasicTableCell {
 #if targetEnvironment(macCatalyst)
         hoverGestureRecognizer = UIHoverGestureRecognizer(target: self, action: #selector(hovering(_:)))
         self.addGestureRecognizer(hoverGestureRecognizer)
+        isHovered = false
+        doubleTapGestureRecognizer = UITapGestureRecognizer(target: self, action: #selector(doubleTap))
+        doubleTapGestureRecognizer.numberOfTapsRequired = 2
+        self.addGestureRecognizer(doubleTapGestureRecognizer)
+#else
+        singleTapGestureRecognizer = UITapGestureRecognizer(target: self, action: #selector(singleTap))
+        singleTapGestureRecognizer.numberOfTapsRequired = 1
+        // to handle double and single tap recognizer in parallel:
+        //singleTapGestureRecognizer.require(toFail: doubleTapGestureRecognizer)
+        self.addGestureRecognizer(singleTapGestureRecognizer)
 #endif
     }
+
+#if targetEnvironment(macCatalyst)
+    deinit {
+        unregister()
+    }
+    
+    private func register() {
+        guard !isNotificationRegistered else { return }
+        appDelegate.notificationHandler.register(self, selector: #selector(self.playerPlay(notification:)), name: .playerPlay, object: nil)
+        appDelegate.notificationHandler.register(self, selector: #selector(self.playerPause(notification:)), name: .playerPause, object: nil)
+        appDelegate.notificationHandler.register(self, selector: #selector(self.playerStop(notification:)), name: .playerStop, object: nil)
+        isNotificationRegistered = true
+    }
+    
+    private func unregister() {
+        guard isNotificationRegistered else { return }
+        appDelegate.notificationHandler.remove(self, name: .playerPlay, object: nil)
+        appDelegate.notificationHandler.remove(self, name: .playerPause, object: nil)
+        appDelegate.notificationHandler.remove(self, name: .playerStop, object: nil)
+        isNotificationRegistered = false
+    }
+#endif
     
     func display(playable: AbstractPlayable, displayMode: DisplayMode = .normal, playContextCb: GetPlayContextFromTableCellCallback?, rootView: UIViewController, playerIndexCb: GetPlayerIndexFromTableCellCallback? = nil, isDislayAlbumTrackNumberStyle: Bool = false, download: Download? = nil, isMarked: Bool = false) {
         if playIndicator == nil {
@@ -84,6 +125,11 @@ class PlayableTableCell: BasicTableCell {
         
         self.deleteButton.isHidden = true
         self.deleteButton.tintColor = .red
+        self.playOverArtworkButton.isHidden = true
+        self.playOverArtworkButton.layer.backgroundColor = UIColor.imageOverlayBackground.cgColor
+        self.playOverArtworkButton.layer.cornerRadius = CornerRadius.small.asCGFloat
+        self.playOverNumberButton.isHidden = true
+
         self.playable = playable
         self.displayMode = displayMode
         self.playContextCb = playContextCb
@@ -91,8 +137,18 @@ class PlayableTableCell: BasicTableCell {
         self.rootView = rootView
         self.isDislayAlbumTrackNumberStyle = isDislayAlbumTrackNumberStyle
         self.download = download
-        self.selectionStyle = .default
+        self.selectionStyle = .none
         self.isMarked = isMarked
+        
+#if targetEnvironment(macCatalyst)
+        hoverGestureRecognizer.isEnabled = (displayMode == .normal)
+        isHovered = false
+        doubleTapGestureRecognizer.isEnabled = (displayMode == .normal)
+        register()
+#else
+        singleTapGestureRecognizer.isEnabled = (displayMode == .normal)
+#endif
+        
         refresh()
     }
 
@@ -243,13 +299,6 @@ class PlayableTableCell: BasicTableCell {
         playIndicator?.reset()
     }
     
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesEnded(touches, with: event)
-        if displayMode == .normal {
-           playThisSong()
-        }
-    }
-    
     func playThisSong() {
         guard let playable = playable else { return }
         if let playerIndex = playerIndexCb?(self) {
@@ -283,12 +332,109 @@ class PlayableTableCell: BasicTableCell {
         }
     }
     
+    @IBAction func playButtonPressed(_ sender: Any) {
+        if appDelegate.player.currentlyPlaying == self.playable,
+           appDelegate.player.isPlaying {
+            appDelegate.player.pause()
+        } else if appDelegate.player.currentlyPlaying == self.playable {
+            appDelegate.player.play()
+        } else {
+            playThisSong()
+        }
+        refreshHoverStyle()
+    }
+    
+    func refreshHoverStyle() {
+        if isHovered {
+            playIndicator?.reset()
+            if isDeleteButtonAllowedToBeVisible {
+                self.deleteButton.isHidden = false
+            } else {
+                var buttonImg = UIImage()
+                if appDelegate.player.currentlyPlaying == self.playable,
+                   appDelegate.player.isPlaying {
+                    buttonImg = UIImage.pause
+                } else {
+                    buttonImg = UIImage.play
+                }
+                if isDislayAlbumTrackNumberStyle {
+                    trackNumberLabel.isHidden = true
+                    playOverNumberButton.isHidden = false
+                    playOverNumberButton.imageView?.tintColor = appDelegate.storage.settings.themePreference.asColor
+                    playOverNumberButton.setImage(buttonImg, for: UIControl.State.normal)
+                    playOverArtworkButton.isHidden = true
+                } else {
+                    playOverArtworkButton.isHidden = false
+                    playOverArtworkButton.imageView?.tintColor = .white
+                    playOverArtworkButton.setImage(buttonImg, for: UIControl.State.normal)
+                    playOverNumberButton.isHidden = true
+                }
+            }
+            self.cacheIconImage.tintColor = appDelegate.storage.settings.themePreference.asColor
+            optionsButton.imageView?.tintColor = appDelegate.storage.settings.themePreference.asColor
+            backgroundColor = .secondarySystemGroupedBackground
+        } else {
+            playOverArtworkButton.isHidden = true
+            playOverNumberButton.isHidden = true
+            refresh()
+            deleteButton.isHidden = true
+            refreshSubtitleColor()
+            optionsButton.imageView?.tintColor = .label
+            backgroundColor = .clear
+        }
+    }
+    
     @objc func hovering(_ recognizer: UIHoverGestureRecognizer) {
         switch recognizer.state {
         case .began:
-            self.deleteButton.isHidden = !isDeleteButtonAllowedToBeVisible
+            isHovered = true
+            refreshHoverStyle()
         case .ended:
-            self.deleteButton.isHidden = true
+            isHovered = false
+            refreshHoverStyle()
+        default:
+            if !isHovered {
+                isHovered = true
+                refreshHoverStyle()
+            }
+            break
+        }
+    }
+
+    @objc func doubleTap(sender: UITapGestureRecognizer) {
+        switch sender.state {
+        case .ended:
+            if displayMode == .normal {
+               playThisSong()
+            }
+        default:
+            break
+        }
+    }
+    
+    @objc private func playerPlay(notification: Notification) {
+        guard isHovered else { return }
+        refreshHoverStyle()
+    }
+    
+    @objc private func playerPause(notification: Notification) {
+        guard isHovered else { return }
+        refreshHoverStyle()
+    }
+    
+    @objc private func playerStop(notification: Notification) {
+        guard isHovered else { return }
+        refreshHoverStyle()
+    }
+    
+#else
+    
+    @objc func singleTap(sender: UITapGestureRecognizer) {
+        switch sender.state {
+        case .ended:
+            if displayMode == .normal {
+               playThisSong()
+            }
         default:
             break
         }
